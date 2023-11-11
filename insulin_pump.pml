@@ -1,13 +1,16 @@
 int clock_ms
-byte blood_level;
-chan blood_channel = [0] of {byte};
+byte blood_sugar;
 byte blood_array[3];
-chan controller_hasRun = [0] of {byte};
 
-proctype clock_proc()
+#define RATE 1
+#define M_SECONDS_PER_HOUR 3600000
+#define M_SECONDS_PER_MINUTE 60000
+
+active proctype clock_proc()
 {    
     do
-        :: clock_ms++
+        :: clock_ms == M_SECONDS_PER_HOUR * 24 * RATE -> clock_ms = 0; printf("reset clock");
+        :: else -> clock_ms++
     od
 }
 
@@ -15,11 +18,11 @@ inline sugar_ok()
 {
     blood_array[0] = blood_array[1];
     blood_array[1] = blood_array[2];
-    blood_array[2] = blood_level;
+    blood_array[2] = blood_sugar;
     if
         :: blood_array[0] == blood_array[1] && blood_array[1] == blood_array[2] ->
             printf("Sugar level is stable\n");
-            blood_channel!blood_level;
+            blood_channel!blood_sugar;
         :: else -> skip;
     fi
 }
@@ -28,11 +31,11 @@ inline sugar_high()
 {
     blood_array[0] = blood_array[1];
     blood_array[1] = blood_array[2];
-    blood_array[2] = blood_level;
+    blood_array[2] = blood_sugar;
     if
         :: blood_array[0] == blood_array[1] && blood_array[1] == blood_array[2] ->
             printf("Sugar level is high\n");
-            blood_channel!blood_level;
+            blood_channel!blood_sugar;
         :: else -> skip;
     fi
 }
@@ -41,16 +44,16 @@ inline sugar_low()
 {
     blood_array[0] = blood_array[1];
     blood_array[1] = blood_array[2];
-    blood_array[2] = blood_level;
+    blood_array[2] = blood_sugar;
     if
         :: blood_array[0] == blood_array[1] && blood_array[1] == blood_array[2] ->
             printf("Sugar level is low\n");
-            blood_channel!blood_level;
+            blood_channel!blood_sugar;
         :: else -> skip;
     fi
 }
 
-proctype controller()
+active proctype controller()
 {
     int prev_time = 0
     int curr_time;
@@ -58,30 +61,26 @@ proctype controller()
     do
         :: curr_time = clock_ms;
         if
-            :: curr_time - prev_time >= 1000 * 60 * 200 ->
-                printf("Controller has run for 200 minutes\n");
-                printf("Blood level: %d\n", blood_level);
-                prev_time = curr_time;
-            :: else -> skip;
+            :: curr_time - prev_time >= 1000 * 60 * 10 * RATE->
+                printf("Controller has run for 10 minutes\n");
+                printf("Blood level: %d\n", blood_sugar);
+                prev_time = curr_time; 
+            :: else -> if
+                :: curr_time < prev_time -> prev_time = 0;
+                :: else -> skip;
+                fi
         fi
     od
 }
 
-proctype sensor()
+active proctype blood_sugar_proc()
 {
     do
-    ::if
-        :: blood_level > 100 -> sugar_high();
-        :: blood_level < 50 -> sugar_low();
-        :: else -> sugar_ok();
-    fi
-	:: blood_level++	;
-	:: blood_level--	;	
-
-	od;
+	:: blood_sugar = blood_sugar;
+	od
 }
 
-proctype self_test()
+active proctype self_test_unit()
 {
     int prev_time = 0
     int curr_time;
@@ -89,17 +88,33 @@ proctype self_test()
     do
         :: curr_time = clock_ms;
         if
-            :: curr_time - prev_time >= 1000 * 60 * 10 ->
-                printf("Self test has run for 10 minutes\n");
+            :: curr_time - prev_time >= 1000 * 30 * RATE->
+                printf("Self test has run for 30 seconds\n");
                 prev_time = curr_time;
-            :: else -> skip;
+            :: else -> if
+                :: curr_time < prev_time -> prev_time = 0;
+                :: else -> skip;
+                fi
         fi
     od
 }
 
-init {
-    run clock_proc();
-    run controller();
-    run self_test();
-    run sensor();
+active proctype display_time(){
+    byte hour = 0;
+    byte minute = 0;
+
+    int curr_clock_ms; 
+    int prev_clock_ms = 0;
+    do
+        :: curr_clock_ms = clock_ms;
+        if
+            :: curr_clock_ms - prev_clock_ms >= 1000 * 60 * RATE ->
+                minute++;
+                hour = minute/60;
+
+                prev_clock_ms = curr_clock_ms;
+                // printf("Current time: %02d:%02d\n", hour%24, minute%60)
+            :: else -> skip;
+        fi
+    od
 }
