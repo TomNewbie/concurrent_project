@@ -1,10 +1,10 @@
-#define RATE 1
-
+#define TIME_SCALE 3
+#define CLOCK_SPEED 1
 #define SECOND_TO_MILLISECOND 1000
 #define MINUTE_TO_MILLISECOND 60 * SECOND_TO_MILLISECOND
 #define HOUR_TO_MILLISECOND 60 * MINUTE_TO_MILLISECOND
 
-#define RESET_TIME 24 * HOUR_TO_MILLISECOND * RATE
+#define RESET_TIME 24 * HOUR_TO_MILLISECOND * TIME_SCALE
 
 #define MIN_BLOOD_SUGAR 1
 #define MAX_BLOOD_SUGAR 40
@@ -17,48 +17,79 @@
 #define SAFE_MIN 6
 #define SAFE_MAX 14
 
-#define INSULIN_CAPACITY 100
+#define INSULIN_CAPACITY 20
 
 int clock_ms
 byte blood_sugar = SAFE_MIN;
 
+// insulin reservoir
 byte insulin_available = INSULIN_CAPACITY;
-byte insulin_amount;
 
-mtype = {SUGAR_LOW};
-chan status = [0] of {mtype};
+// insulin pump
+chan dose_to_pump = [0] of {byte};
+chan dose_to_display = [0] of {byte};
+byte delivered_dose;
+byte cumDose = 0;
+
+// system status
+// mtype = {RUNNING, ERROR, WARNING};
+mtype = {NO_INSULIN, INSULIN_LOW, SENSOR_FAIL, BATTERY_LOW};
+mtype = {SUGAR_LOW, SUGAR_HIGH, SUGAR_OK};
+chan status = [16] of {mtype};
 
 active proctype clock_proc()
 {
   do
-    :: clock_ms == RESET_TIME -> clock_ms = 0; printf("reset clock");
-    :: else -> clock_ms++;
+    :: clock_ms == RESET_TIME -> 
+      clock_ms = 0;
+      cumDose = 0;
+      printf("Resetting clock"); 
+    :: else -> clock_ms = clock_ms + CLOCK_SPEED;
   od
 }
 
-inline split_time_digit(time, d1, d2)
+inline split_two_digit(num, d1, d2)
 {
   if
-    :: time < 10 -> d1 = 0; d2 = time;
-    :: else -> d1 = time/10; d2 = time%10;
+    :: num < 10 -> d1 = 0; d2 = num;
+    :: else -> d1 = num/10; d2 = num%10;
   fi
 }
 
-inline LOG_INIT()
+inline get_current_time_digits(h1, h2, m1, m2, s1, s2)
 {
-  byte hour = clock_ms/(HOUR_TO_MILLISECOND * RATE);
-  byte hour1, hour2;
-  split_time_digit(hour, hour1, hour2);
+  byte hour = clock_ms/(HOUR_TO_MILLISECOND * TIME_SCALE);
+  split_two_digit(hour, h1, h2);
 
-  byte minute = (clock_ms - hour * HOUR_TO_MILLISECOND * RATE)/(MINUTE_TO_MILLISECOND * RATE);
-  byte minute1, minute2;
-  split_time_digit(minute, minute1, minute2);
+  byte minute = (clock_ms - hour * HOUR_TO_MILLISECOND * TIME_SCALE)/(MINUTE_TO_MILLISECOND * TIME_SCALE);
+  split_two_digit(minute, m1, m2);
 
-  byte second = (clock_ms - hour * HOUR_TO_MILLISECOND * RATE - minute * MINUTE_TO_MILLISECOND * RATE)/(SECOND_TO_MILLISECOND * RATE);
-  byte second1, second2;
-  split_time_digit(second, second1, second2);
+  byte second = (clock_ms - hour * HOUR_TO_MILLISECOND * TIME_SCALE - minute * MINUTE_TO_MILLISECOND * TIME_SCALE)/(SECOND_TO_MILLISECOND * TIME_SCALE);
+  split_two_digit(second, s1, s2);
+}
 
-  printf("[%d%d:%d%d:%d%d] ", hour1, hour2, minute1, minute2, second1, second2);
+inline INFO()
+{
+  byte h1, h2, m1, m2, s1, s2;
+  get_current_time_digits(h1, h2, m1, m2, s1, s2);
+
+  printf("[%d%d:%d%d:%d%d][INFO] ", h1, h2, m1, m2, s1, s2);
+}
+
+inline WARN()
+{
+  byte h1, h2, m1, m2, s1, s2;
+  get_current_time_digits(h1, h2, m1, m2, s1, s2);
+
+  printf("[%d%d:%d%d:%d%d][WARNING] ", h1, h2, m1, m2, s1, s2);
+}
+
+inline ERR()
+{
+  byte h1, h2, m1, m2, s1, s2;
+  get_current_time_digits(h1, h2, m1, m2, s1, s2);
+
+  printf("[%d%d:%d%d:%d%d][ERROR] ", h1, h2, m1, m2, s1, s2);
 }
 
 inline rate_sleep(rate, curr_time, prev_time)
@@ -131,20 +162,20 @@ inline sugar_ok(r0, r1, r2, out_dose)
   fi
 }
 
-inline sugar_high(r0, r1, r2, dose)
+inline sugar_high(r0, r1, r2, out_dose)
 {
   r2 > SAFE_MAX;
   
   if
     // sugar level increasing. Round down if below 1 unit
     :: r2 > r1 ->
-      max(compDose, (r2 - r1)/4, MINIMUM_DOSE);
+      max(out_dose, (r2 - r1)/4, MINIMUM_DOSE);
     // sugar level stable
-    :: (r2 == r1) -> compDose = MINIMUM_DOSE;
+    :: (r2 == r1) -> out_dose = MINIMUM_DOSE;
     // sugar level falling and rate of decrease increasing
-    :: (r2 <= r1 && (r2 - r1 <= r1 - r0)) -> compDose = 0;
+    :: (r2 <= r1 && (r2 - r1 <= r1 - r0)) -> out_dose = 0;
     // sugar level falling and rate of decrease decreasing
-    :: else -> compDose = MINIMUM_DOSE;
+    :: else -> out_dose = MINIMUM_DOSE;
   fi
 }
 
@@ -153,11 +184,10 @@ active proctype controller()
   byte compDose;
   int prev_time = clock_ms;
   int r0, r1, r2;
-  byte cumDose = 0;
   setUp(r0, r1, r2, compDose);
 
   do
-    :: rate_sleep(10 * MINUTE_TO_MILLISECOND * RATE, clock_ms, prev_time);
+    :: rate_sleep(10 * MINUTE_TO_MILLISECOND * TIME_SCALE, clock_ms, prev_time);
       // update blood sugar
       r0 = r1;
       r1 = r2;
@@ -166,30 +196,42 @@ active proctype controller()
       if
         :: insulin_available >= MAX_SINGLE_DOSE &&
           cumDose < MAX_DAILY_DOSE -> 
-          atomic { LOG_INIT(); printf("Controller has run for 10 minutes\n"); }
-          atomic { LOG_INIT(); printf("Blood level: %d\n", blood_sugar); }
+          atomic { INFO(); printf("Controller has run for 10 minutes\n"); }
+          atomic { INFO(); printf("Blood level: %d\n", blood_sugar); }
           if
             :: sugar_low(r0, r1, r2, compDose) ->
-              atomic { LOG_INIT(); printf("Sugar level is low. Dose=%d\n", compDose); }
+              atomic { WARN(); printf("Sugar level is low.\n"); }
             :: sugar_ok(r0, r1, r2, compDose) ->
-              atomic { LOG_INIT(); printf("Sugar level is ok. Dose=%d\n", compDose); }
+              atomic { INFO(); printf("Sugar level is ok.\n"); }
             :: sugar_high(r0, r1, r2, compDose) ->
-              atomic { LOG_INIT(); printf("Sugar level is high. Dose=%d\n", compDose); }
+              atomic { ERR(); printf("Sugar level is high.\n"); }
           fi
 
           // send dose to pump
-          insulin_amount = insulin_amount + compDose;
-          cumDose = cumDose + compDose;
-          insulin_available = insulin_available - compDose;
-
+          dose_to_pump!compDose;
+          // send dose to display
+          dose_to_display!compDose;  
+          
           if
-            :: insulin_available <= MAX_SINGLE_DOSE * 4 -> printf("Insulin low");
+            :: insulin_available <= MAX_SINGLE_DOSE * 4 -> status!INSULIN_LOW;
             :: else -> skip;
           fi            
-          
-          atomic { LOG_INIT(); printf("Insulin available: %d\n", insulin_available); }
+        
+          atomic { INFO(); printf("Insulin available: %d\n", insulin_available); }
         :: else -> printf("Exceed cum dose or insulin low");
       fi
+  od
+}
+
+active proctype insulin_pump_proc()
+{
+  byte dose;
+  do 
+    :: dose_to_pump?dose ->
+      delivered_dose = delivered_dose + dose;
+      cumDose = cumDose + dose;
+
+      insulin_available = insulin_available - dose;
   od
 }
 
@@ -199,13 +241,13 @@ active proctype blood_sugar_proc()
   int v, a;
 
   do
-  :: rate_sleep(MINUTE_TO_MILLISECOND * RATE, clock_ms, prev_time);
+  :: rate_sleep(MINUTE_TO_MILLISECOND * TIME_SCALE, clock_ms, prev_time);
 
     if
-      :: insulin_amount > 0 ->
+      :: delivered_dose > 0 ->
         // insulin effect
         a = -3;
-        insulin_amount--;
+        delivered_dose--;
         clamp(v, v + a, -3, 1);
       :: else ->
         // natural blood sugar flow
@@ -215,8 +257,8 @@ active proctype blood_sugar_proc()
     fi
 
     clamp(blood_sugar, blood_sugar + v, MIN_BLOOD_SUGAR, MAX_BLOOD_SUGAR);
-    // max single dose
-    atomic { LOG_INIT(); printf("Blood sugar level: %d, v=%d, a=%d\n", blood_sugar, v, a); }
+    
+    atomic { INFO(); printf("Blood sugar level: %d, v=%d, a=%d\n", blood_sugar, v, a); }
 	od
 }
 
@@ -225,15 +267,33 @@ active proctype self_test_unit()
   int prev_time = clock_ms;
 
   do
-    :: rate_sleep(30 * SECOND_TO_MILLISECOND * RATE, clock_ms, prev_time);
-      atomic { LOG_INIT(); printf("Self test has run for 30 seconds\n"); }
+    :: rate_sleep(30 * SECOND_TO_MILLISECOND * TIME_SCALE, clock_ms, prev_time);
+      atomic { INFO(); printf("Self test has run for 30 seconds\n"); }
   od
 }
 
+// display 1 -> State error or normal
+// display 2 -> dose ammount
+active proctype display_dose(){
+  byte dose;
+  do
+    :: dose_to_display?dose ->
+      atomic { INFO(); printf("Dose: %d\n", dose); }
+  od
+}
 
-// active proctype display_dose(){
-//    do
-//       :: dose?insulin_amount;
-//          atomic { LOG_INIT(); printf("Dose: %d\n", insulin_amount); }
-//    od
+// active proctype display_status(){
+//   mtype status;
+//   do
+//     :: status?SUGAR_LOW -> atomic { INFO(); printf("Sugar level is low.\n"); }
+//     :: else -> skip;
+//   od
 // }
+
+// TODO 
+// RESET
+
+// sensor fail
+// batery low
+// insulin removed
+// insulin low
