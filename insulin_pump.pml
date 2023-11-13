@@ -40,11 +40,15 @@ chan status = [16] of {mtype};
 active proctype clock_proc()
 {
   do
-    :: clock_ms == RESET_TIME -> 
-      clock_ms = 0;
-      cumDose = 0;
-      printf("Resetting clock"); 
-    :: else -> clock_ms = clock_ms + CLOCK_SPEED;
+    :: int c = clock_ms + CLOCK_SPEED;
+      if
+        :: c < RESET_TIME -> clock_ms = c;
+        :: else -> atomic {
+          clock_ms = c % RESET_TIME;
+          cumDose = 0;
+          printf("[INFO] Resetting clock");
+        }
+      fi
   od
 }
 
