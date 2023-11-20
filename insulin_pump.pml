@@ -54,8 +54,8 @@ byte cumDose = 0;
 
 // system status
 mtype = {RUNNING, ERROR, WARNING, RESET};
-mtype = {SUGAR_LOW, INSULIN_LOW};
-mtype = {NO_INSULIN, SENSOR_FAIL, BATTERY_LOW, EXCEED_CUM_DOSE};
+mtype = {SUGAR_LOW, SUGAR_HIGH};
+mtype = {NO_INSULIN, SENSOR_FAIL, BATTERY_LOW, EXCEED_CUM_DOSE, INSULIN_LOW};
 mtype system_status = RUNNING;
 
 // display status
