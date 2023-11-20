@@ -1,75 +1,83 @@
+// Increase the clock speed for faster simulation
+#define CLOCK_SPEED 2
+
+// Increase the time scale for slower simulation
 #define TIME_SCALE 1
-#define CLOCK_SPEED 1
+
+// Time units
 #define SECOND_TO_MILLISECOND 1000
 #define MINUTE_TO_MILLISECOND 60 * SECOND_TO_MILLISECOND
 #define HOUR_TO_MILLISECOND 60 * MINUTE_TO_MILLISECOND
 
 #define RESET_TIME 24 * HOUR_TO_MILLISECOND * TIME_SCALE
 
+// Blood sugar level
 #define MIN_BLOOD_SUGAR 1
 #define MAX_BLOOD_SUGAR 40
-
-#define MAX_SINGLE_DOSE 4
-#define MAX_DAILY_DOSE 25
-
-#define MINIMUM_DOSE 1
-
 #define SAFE_MIN 6
 #define SAFE_MAX 14
 
+// Insulin computation
+#define MAX_SINGLE_DOSE 4
+#define MAX_DAILY_DOSE 25
+#define MINIMUM_DOSE 1
+
+// Hardware configuration
 #define INSULIN_CAPACITY 20
-
 #define LOW_BATTERY_LEVEL 10
-
-int clock_ms
-
-byte blood_sugar = SAFE_MIN;
-
-// insulin reservoir
-typedef InsulinReservoir {
-  bool is_present;
-  byte insulin_level;
-  byte capacity;
-};
-
-inline init_reservoir(r, cap)
-{
-  r.capacity = cap;
-  reset_reservoir(r);
-}
-
-inline reset_reservoir(r)
-{
-  r.insulin_level = r.capacity;
-  r.is_present = true;
-}
-
-InsulinReservoir reservoir;
-
-// insulin pump
-chan dose_to_pump = [0] of {byte};
-chan dose_to_display = [0] of {byte};
-byte delivered_dose;
-byte cumDose = 0;
-
-// system status
-mtype = {RUNNING, ERROR, WARNING, RESET};
-mtype = {SUGAR_LOW, SUGAR_HIGH};
-mtype = {NO_INSULIN, SENSOR_FAIL, BATTERY_LOW, EXCEED_CUM_DOSE, INSULIN_LOW};
-mtype system_status = RUNNING;
-
-// display status
-chan display1 = [0] of {mtype};
-
-// battery
-byte battery_level = 100;
 
 
 
 /*
- * Utility inline functions
+ * Global variables
  */
 
+int clock_ms
+
+// blood sugar reading
+byte blood_sugar = SAFE_MIN;
+
+/*
+ * Insulin computation
+ */
+byte cumDose = 0;
+chan dose_to_pump = [0] of {byte};
+byte delivered_dose = 0;
+
+/*
+ * System status
+ */
+mtype = {RUNNING, ERROR, WARNING};
+mtype system_status = RUNNING;
+
+// Warning types
+mtype = {SUGAR_LOW, INSULIN_LOW};
+// Error types
+mtype = {NO_INSULIN, SENSOR_FAIL, BATTERY_LOW, EXCEED_CUM_DOSE};
+
+/*
+ * Displays
+ */
+chan display1 = [0] of {mtype};
+chan display2 = [0] of {mtype};
+
+/*
+ * Hardware variables
+ */
+byte battery_level = 100;
+bool sensor_failed = false;
+chan external_error_handling = [2] of {mtype};
+
+bool is_reservoir_present = true;
+byte insulin_available = INSULIN_CAPACITY;
+
+
+
+/*
+ * Utility inline definitions
+ */
+
+// set lhs to the minimum of a and b
 inline min(lhs, a, b)
 {
   if
@@ -78,7 +86,7 @@ inline min(lhs, a, b)
   fi
 }
 
-
+// set lhs to the maximum of a and b
 inline max(lhs, a, b)
 {
   if
@@ -87,6 +95,7 @@ inline max(lhs, a, b)
   fi
 }
 
+// clamp the lhs value between min_value and max_value
 inline clamp(lhs, rhs, min_value, max_value)
 {
   if
@@ -118,11 +127,14 @@ active proctype clock_proc()
   od
 }
 
+// Simulate a process sleeping for a given rate
 inline rate_sleep(rate, curr_time, prev_time)
 {
   atomic {
     do
+    // block until the elapsed time is greater than the rate
     :: curr_time - prev_time >= rate -> prev_time = curr_time; break;
+    // roll back if the clock has been reset
     :: curr_time < prev_time -> prev_time = prev_time - RESET_TIME;
     od
   }
@@ -134,6 +146,7 @@ inline rate_sleep(rate, curr_time, prev_time)
  * Logging
  */
 
+// Split a two digit number into two digits
 inline split_two_digit(num, d1, d2)
 {
   if
@@ -142,6 +155,7 @@ inline split_two_digit(num, d1, d2)
   fi
 }
 
+// Get the current time in separate digits
 inline get_current_time_digits(h1, h2, m1, m2, s1, s2)
 {
   byte hour = clock_ms/(HOUR_TO_MILLISECOND * TIME_SCALE);
@@ -154,6 +168,7 @@ inline get_current_time_digits(h1, h2, m1, m2, s1, s2)
   split_two_digit(second, s1, s2);
 }
 
+// Header for an info log
 inline INFO()
 {
   byte h1, h2, m1, m2, s1, s2;
@@ -162,6 +177,7 @@ inline INFO()
   printf("[%d%d:%d%d:%d%d][INFO] ", h1, h2, m1, m2, s1, s2);
 }
 
+// Header for a warning log
 inline WARN()
 {
   byte h1, h2, m1, m2, s1, s2;
@@ -170,6 +186,7 @@ inline WARN()
   printf("[%d%d:%d%d:%d%d][WARNING] ", h1, h2, m1, m2, s1, s2);
 }
 
+// Header for an error log
 inline ERR()
 {
   byte h1, h2, m1, m2, s1, s2;
@@ -181,7 +198,7 @@ inline ERR()
 
 
 /*
- * Controller
+ * Main controller - insulin computation
  */
 
 inline sugar_low(r0, r1, r2, out_dose)
@@ -229,38 +246,46 @@ inline sugar_high(r0, r1, r2, out_dose)
 
 inline run_insulin_computation(r0, r1, r2)
 {
+  // guard
+  system_status != ERROR &&
+  insulin_available >= MAX_SINGLE_DOSE &&
+  cumDose < MAX_DAILY_DOSE;
+
+  atomic { INFO(); printf("Running insulin computation...\n"); }
+  
   byte compDose;
 
+  // compute the insulin dose
   if
-  :: cumDose < MAX_DAILY_DOSE && reservoir.insulin_level >= MAX_SINGLE_DOSE -> 
-    atomic { INFO(); printf("Controller has run for 10 minutes\n"); }
-    atomic { INFO(); printf("Blood level: %d\n", blood_sugar); }
-    if
-    :: sugar_low(r0, r1, r2, compDose);
-    :: sugar_ok(r0, r1, r2, compDose);
-    :: sugar_high(r0, r1, r2, compDose);
-    fi
-
-    // send dose to pump
-    dose_to_pump!compDose;
-    // send dose to display
-    dose_to_display!compDose;  
-    
-    if
-    :: reservoir.insulin_level <= MAX_SINGLE_DOSE * 4 -> display1!INSULIN_LOW;
-    :: else -> skip;
-    fi            
-
-    atomic { INFO(); printf("Insulin available: %d\n", reservoir.insulin_level); }
-
-  :: reservoir.insulin_level < MAX_SINGLE_DOSE ->
-    system_status = ERROR;
-    display1!INSULIN_LOW;
-
-  :: else ->
-    system_status = WARNING;
-    display1!EXCEED_CUM_DOSE;
+  :: sugar_low(r0, r1, r2, compDose);
+  :: sugar_ok(r0, r1, r2, compDose);
+  :: sugar_high(r0, r1, r2, compDose);
   fi
+  
+  clamp(compDose, compDose, 0, MAX_SINGLE_DOSE);
+
+  if
+  // The maximum daily dose would be exceeded if the computed dose was delivered
+  :: compDose + cumDose > MAX_DAILY_DOSE ->
+    system_status = WARNING;
+    compDose = MAX_DAILY_DOSE - cumDose;
+  :: else -> skip;
+  fi
+
+  // Send dose to pump
+  dose_to_pump!compDose;
+
+  insulin_available = insulin_available - compDose;
+  cumDose = cumDose + compDose;
+  
+  if
+  :: insulin_available <= MAX_SINGLE_DOSE * 4 ->
+    system_status = WARNING;
+    display1!INSULIN_LOW;
+  :: else -> skip;
+  fi
+
+  atomic { INFO(); printf("Insulin available: %d\n", insulin_available); }
 }
 
 active proctype controller()
@@ -268,7 +293,8 @@ active proctype controller()
   int prev_time = clock_ms;
   int r0, r1, r2;
 
-  init_reservoir(reservoir, INSULIN_CAPACITY);
+  is_reservoir_present = true;
+  insulin_available = INSULIN_CAPACITY;
 
   r0 = 0;
   r1 = SAFE_MIN;
@@ -282,32 +308,8 @@ active proctype controller()
     r2 = blood_sugar;
     
     if
-    :: system_status == ERROR -> skip;
-    :: else -> run_insulin_computation(r0, r1, r2);
-    fi
-  od
-}
-
-active proctype self_test_unit()
-{
-  int prev_time = clock_ms;
-
-  do
-  :: rate_sleep(30 * SECOND_TO_MILLISECOND * TIME_SCALE, clock_ms, prev_time);
-    atomic { INFO(); printf("Running self test...\n"); }
-
-    if
-    :: battery_level <= LOW_BATTERY_LEVEL ->
-      system_status = ERROR;
-      display1!BATTERY_LOW;
-    :: else -> skip;
-    fi  
-    
-    if
-    :: reservoir.is_present && reservoir.insulin_level < MAX_SINGLE_DOSE ->
-      system_status = ERROR;
-      display1!NO_INSULIN;
-    :: else -> skip;
+    :: run_insulin_computation(r0, r1, r2);
+    :: else -> atomic { ERR(); printf("Cannot run insulin computation\n"); }
     fi
   od
 }
@@ -315,30 +317,18 @@ active proctype self_test_unit()
 
 
 /*
- * Other simulations
+ * Insulin pump simulation
  */
-
-// Simulate battery drain
-active proctype battery_proc()
-{
-  int prev_time = clock_ms;
-
-  do
-  :: rate_sleep(1 * HOUR_TO_MILLISECOND * TIME_SCALE, clock_ms, prev_time);
-    clamp(battery_level, battery_level - 1, 0, 100);
-  od
-}
 
 // Simulate pump delivery
 active proctype insulin_pump_proc()
 {
   byte dose;
+  
   do 
   :: dose_to_pump?dose ->
     delivered_dose = delivered_dose + dose;
-    cumDose = cumDose + dose;
-
-    reservoir.insulin_level = reservoir.insulin_level - dose;
+    display2!dose;
   od
 }
 
@@ -363,23 +353,112 @@ active proctype blood_sugar_proc()
       a = a - 2;
       clamp(v, v + a, -1, 3);
     fi
-
+    
     clamp(blood_sugar, blood_sugar + v, MIN_BLOOD_SUGAR, MAX_BLOOD_SUGAR);
     
     atomic { INFO(); printf("Blood sugar level: %d, v=%d, a=%d\n", blood_sugar, v, a); }
 	od
 }
 
-// Simulate a reset of the system when an error occurs
-active proctype reset_proc()
+
+
+/*
+ * Self test unit
+ */
+
+inline run_error_tests(out_is_error)
+{
+  out_is_error = false;
+
+  if
+  :: battery_level <= LOW_BATTERY_LEVEL ->
+    out_is_error = true;
+    display1!BATTERY_LOW;
+    
+    external_error_handling!BATTERY_LOW;
+  :: else -> skip;
+  fi
+  
+  if
+  :: is_reservoir_present && insulin_available < MAX_SINGLE_DOSE ->
+    out_is_error = true;
+    display1!NO_INSULIN;
+    
+    external_error_handling!NO_INSULIN;
+  :: else -> skip;
+  fi
+
+  if
+  :: cumDose > MAX_DAILY_DOSE ->
+    out_is_error = true;
+    display1!EXCEED_CUM_DOSE;
+  :: else -> skip;
+  fi
+
+  if
+  :: sensor_failed ->
+    out_is_error = true;
+    display1!SENSOR_FAIL;
+  :: else -> skip;
+  fi
+}
+
+active proctype self_test_unit()
+{
+  int prev_time = clock_ms;
+
+  do
+  :: rate_sleep(30 * SECOND_TO_MILLISECOND * TIME_SCALE, clock_ms, prev_time);
+    atomic { INFO(); printf("Running self test...\n"); }
+
+    bool is_error;
+    run_error_tests(is_error);
+
+    if
+    :: is_error -> system_status = ERROR;
+    :: else -> system_status = RUNNING;
+    fi
+  od
+}
+
+
+
+/*
+ * External error handling simulation
+ */
+
+// Simulate battery drain
+active proctype battery_proc()
+{
+  int prev_time = clock_ms;
+
+  do
+  :: rate_sleep(1 * HOUR_TO_MILLISECOND * TIME_SCALE, clock_ms, prev_time);
+    clamp(battery_level, battery_level - 1, 0, 100);
+  od
+}
+
+// Simulate battery replacement
+active proctype replace_battery_proc()
 {
   do
-  :: system_status == ERROR ->
-    atomic { INFO(); printf("Resetting the system...\n"); }
+  :: external_error_handling?BATTERY_LOW ->
+    atomic { INFO(); printf("Replacing the battery...\n"); }
     
     battery_level = 100;
-    reservoir.insulin_level = INSULIN_CAPACITY;
-    system_status = RUNNING;
+  od
+}
+
+// Simulate reservoir replacement
+active proctype replace_reservoir_proc()
+{
+  do
+  :: external_error_handling?NO_INSULIN ->
+    atomic { INFO(); printf("Replacing the insulin reservoir...\n"); }
+
+    is_reservoir_present = false;
+    insulin_available = INSULIN_CAPACITY;
+    is_reservoir_present = true;
   od
 }
 
@@ -401,19 +480,11 @@ active proctype display_status()
   od
 }
 
-// display 2 -> Display amount of dose to pump into patient
 active proctype display_dose()
 {
   byte dose;
-
+  
   do
-  :: dose_to_display?dose -> atomic { INFO(); printf("Dose: %d\n", dose); }
+  :: display2?dose -> atomic { INFO(); printf("Insulin dose: %d\n", dose); }
   od
 }
-
-
-// ERROR test
-// sensor fail
-// exceed cumdose
-
-
